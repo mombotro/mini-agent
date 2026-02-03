@@ -7,7 +7,7 @@ import subprocess
 from datetime import datetime
 from typing import Optional, Dict, List
 from simple_memory import SimpleMemory
-from config import OLLAMA_MODEL, SOUL_PATH
+from config import OLLAMA_MODEL, VISION_MODEL, SOUL_PATH
 
 
 class ThinkingIndicator:
@@ -48,9 +48,10 @@ class ThinkingIndicator:
 class SimpleAgent:
     """Ollama-powered agent with lightweight memory"""
 
-    def __init__(self, model: str = OLLAMA_MODEL):
+    def __init__(self, model: str = OLLAMA_MODEL, vision_model: str = VISION_MODEL):
         """Initialize the agent"""
         self.model = model
+        self.vision_model = vision_model
         self.memory = SimpleMemory()
         self.conversation_history: List[Dict] = []
 
@@ -167,6 +168,60 @@ The user expects you to remember facts they've taught you and conversations you'
         """Force an update to soul.md"""
         self.memory.update_soul_if_needed(force=True)
 
+    def analyze_image(self, image_path: str, prompt: str = "Describe this image in detail") -> str:
+        """Use vision model to extract information from an image"""
+        from pathlib import Path
+
+        # Verify image exists
+        img_path = Path(image_path)
+        if not img_path.exists():
+            return f"Error: Image file not found at {image_path}"
+
+        print(f"  Analyzing image with {self.vision_model}...", end="", flush=True)
+
+        try:
+            # Use absolute path
+            abs_path = str(img_path.absolute())
+
+            response = ollama.chat(
+                model=self.vision_model,
+                messages=[{
+                    'role': 'user',
+                    'content': prompt,
+                    'images': [abs_path]
+                }]
+            )
+            description = response['message']['content']
+            print(" Done!")
+
+            # Debug: show first 100 chars of description
+            print(f"\n  Vision model said: {description[:100]}...")
+
+            return description
+        except Exception as e:
+            print(f" Error!")
+            import traceback
+            traceback.print_exc()
+            return f"Error analyzing image: {e}"
+
+    def chat_with_image(self, user_message: str, image_path: str,
+                       image_prompt: str = "Describe what you see in this image in detail",
+                       save_to_memory: bool = True) -> tuple[str, bool, bool]:
+        """Chat about an image - vision model describes it, text model responds"""
+
+        # Step 1: Get image description from vision model
+        image_description = self.analyze_image(image_path, image_prompt)
+
+        # Step 2: Create enhanced message with image context
+        enhanced_message = f"""[Image provided: {image_path}]
+
+Vision Analysis: {image_description}
+
+User Question: {user_message}"""
+
+        # Step 3: Use regular chat with the enhanced context
+        return self.chat(enhanced_message, save_to_memory=save_to_memory, include_context=True)
+
     def commit_conversation(self, num_exchanges: int = 1) -> str:
         """Manually commit recent conversation exchanges to memory"""
         if not self.conversation_history:
@@ -234,7 +289,9 @@ def main():
     total_memories = stats['total_memories']
     mem_stats = agent.memory.get_stats()
 
-    print(f"[+] Agent initialized! (Model: {agent.model})")
+    print(f"[+] Agent initialized!")
+    print(f"    Text Model: {agent.model}")
+    print(f"    Vision Model: {agent.vision_model}")
     if total_memories > 0:
         if mem_stats['archive'] > 0:
             print(f"[MEMORY] Loaded {mem_stats['hot']} hot + {mem_stats['archive']} archived memories")
@@ -289,6 +346,10 @@ def main():
                 print("\n  /compact")
                 print("    Manually compact memories (move old to archive)")
                 print("    Auto-compaction happens at 1000 memories")
+                print("\n  /image <path> [question]")
+                print("    Analyze an image and ask questions about it")
+                print("    Vision model extracts info, text model responds")
+                print("    Example: /image photo.jpg What do you see?")
                 print("\n  /quit")
                 print("    Exit the agent")
                 print("\n" + "="*60)
@@ -355,6 +416,22 @@ def main():
                 print(f"  Moved: {compact_stats['moved']} memories to archive")
                 print(f"  Hot storage: {compact_stats['hot']} memories")
                 print(f"  Archive: {compact_stats['archive']} memories")
+
+            elif user_input.lower().startswith("/image "):
+                parts = user_input[7:].strip().split(None, 1)
+                if not parts:
+                    print("\n[ERROR] Usage: /image <path> [question]")
+                    continue
+
+                image_path = parts[0]
+                question = parts[1] if len(parts) > 1 else "What do you see in this image?"
+
+                print(f"\n[IMAGE] Analyzing: {image_path}")
+                response, soul_updated, compacted = agent.chat_with_image(question, image_path)
+                print("\nAgent: " + response)
+                if compacted:
+                    stats = agent.memory.get_stats()
+                    print(f"\n  (Memory organized: {stats['hot']} active, {stats['archive']} archived)")
 
             else:
                 response, soul_updated, compacted = agent.chat(user_input)

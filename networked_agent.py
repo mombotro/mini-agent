@@ -38,6 +38,11 @@ class NetworkedPersonalAgent(SimpleAgent):
         self.auto_respond = True
         self.response_chance = 0.15
 
+        # Memory settings for network interactions
+        self.save_network_to_memory = True  # Save network interactions to memory
+        self.save_own_posts = True  # Remember what you post
+        self.save_interesting_posts = True  # Remember interesting posts from others
+
     def extract_name_from_soul(self) -> str:
         """Extract agent name from soul or generate one"""
         soul = self.load_soul()
@@ -135,6 +140,11 @@ class NetworkedPersonalAgent(SimpleAgent):
 
         print(f"\n[Timeline] @{post['agent_name']}: {post['content']}")
 
+        # Save interesting posts to memory
+        if self.save_interesting_posts and self.should_respond_to_post(post):
+            fact = f"AgentNet post from {post['agent_name']}: {post['content'][:100]}"
+            self.memory.add_fact(fact, category="network_posts")
+
         # Check if should respond
         if self.auto_respond and self.should_respond_to_post(post):
             print(f"[Agent] Generating response...")
@@ -142,6 +152,11 @@ class NetworkedPersonalAgent(SimpleAgent):
             if response:
                 await self.network_client.reply(post['id'], response)
                 print(f"[Agent] Replied: {response}")
+
+                # Update soul if needed after interaction
+                soul_updated = self.memory.update_soul_if_needed()
+                if soul_updated:
+                    print("[Soul] Updated after network interaction")
 
     async def on_network_reply(self, data: dict):
         """Handle reply to a post"""
@@ -257,7 +272,18 @@ Use your memories and personality to craft an authentic response.
 """
 
         # Use your existing chat method with memory!
-        response, _, _ = self.chat(prompt, save_to_memory=False, include_context=True)
+        # Save to memory if enabled so agent learns from network interactions
+        response, soul_updated, compacted = self.chat(
+            prompt,
+            save_to_memory=self.save_network_to_memory,
+            include_context=True
+        )
+
+        # Show feedback if soul/memory updated
+        if soul_updated:
+            print("[Soul] Updated based on network interaction")
+        if compacted:
+            print("[Memory] Compacted memories")
 
         # Check if wants to skip
         if "SKIP" in response.upper() and len(response) < 20:
@@ -267,6 +293,11 @@ Use your memories and personality to craft an authentic response.
         response = response.strip()
         if len(response) > 280:
             response = response[:277] + "..."
+
+        # If responding, save this as a fact about the interaction
+        if self.save_interesting_posts:
+            fact = f"Discussed '{post['content'][:50]}...' with {post['agent_name']} on AgentNet"
+            self.memory.add_fact(fact, category="network_interactions")
 
         return response
 
@@ -327,6 +358,12 @@ def main():
                     content = user_input[6:]
                     asyncio.run(agent.network_client.post(content))
                     print("[Posted]")
+
+                    # Save own posts to memory
+                    if agent.save_own_posts:
+                        fact = f"Posted to AgentNet: {content}"
+                        agent.memory.add_fact(fact, category="my_network_posts")
+                        print("[Saved to memory]")
                 else:
                     print("Not connected. Use /connect first")
 
@@ -417,10 +454,55 @@ def main():
                     agent.auto_respond = False
                     print("[Auto-respond disabled]")
 
+            elif user_input.lower().startswith("/memory "):
+                setting = user_input[8:].lower()
+                if setting == "on":
+                    agent.save_network_to_memory = True
+                    print("[Network memory saving enabled]")
+                elif setting == "off":
+                    agent.save_network_to_memory = False
+                    print("[Network memory saving disabled]")
+                elif setting == "status":
+                    print(f"\n[Memory Settings]")
+                    print(f"  Save network to memory: {agent.save_network_to_memory}")
+                    print(f"  Save own posts: {agent.save_own_posts}")
+                    print(f"  Save interesting posts: {agent.save_interesting_posts}")
+                    print()
+
+            elif user_input.lower().startswith("/remember "):
+                # Manually save something to memory
+                fact = user_input[10:]
+                soul_updated = agent.memory.add_fact(fact, category="network")
+                print(f"[Remembered]: {fact}")
+                if soul_updated:
+                    print("[Soul] Updated")
+
+            elif user_input.lower() == "/updatesoul":
+                # Manually trigger soul update
+                agent.memory.update_soul_if_needed(force=True)
+                print("[Soul] Force updated based on all memories")
+
+            elif user_input.lower() == "/stats":
+                # Show memory and soul stats
+                stats = agent.memory.analyze_memories_for_soul()
+                print(f"\n[Agent Statistics]")
+                print(f"  Total memories: {stats.get('total_memories', 0)}")
+                print(f"  Facts learned: {stats.get('total_facts', 0)}")
+                print(f"  Conversations: {len(agent.conversation_history)}")
+                print(f"  Network enabled: {agent.network_enabled}")
+                print(f"  Auto-respond: {agent.auto_respond}")
+                print()
+
             else:
                 # Regular chat with your agent (with memory!)
-                response, _, _ = agent.chat(user_input)
+                response, soul_updated, compacted = agent.chat(user_input)
                 print(f"\n{agent.agent_name}: {response}\n")
+
+                # Show feedback
+                if soul_updated:
+                    print("[Soul] Updated based on this conversation")
+                if compacted:
+                    print("[Memory] Compacted memories")
 
         except KeyboardInterrupt:
             print("\n\nUse /quit to exit")
@@ -460,6 +542,15 @@ def show_help():
     print("  /facts                View stored facts")
     print("  /clear                Clear history")
     print("  /auto on|off          Toggle auto-respond")
+
+    print("\n=== MEMORY COMMANDS ===")
+    print("  /memory on|off        Toggle saving network to memory")
+    print("  /memory status        Show memory settings")
+    print("  /remember <fact>      Manually save fact to memory")
+    print("  /updatesoul           Force update soul.md")
+    print("  /stats                Show agent statistics")
+
+    print("\n=== GENERAL ===")
     print("  /help                 This help")
     print("  /quit                 Exit")
 
