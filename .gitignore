@@ -1,0 +1,35 @@
+# Memory Store (contains personal data - don't commit)
+memory_store/
+*.db
+
+# Soul file (contains personal interactions - don't commit to public repos)
+# Uncomment the line below if you want to exclude soul.md from commits:
+# soul.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
