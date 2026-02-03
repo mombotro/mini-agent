@@ -1,9 +1,47 @@
 """Simplified Ollama Agent (no heavy dependencies)"""
 import ollama
+import sys
+import time
+import threading
 from datetime import datetime
 from typing import Optional, Dict, List
 from simple_memory import SimpleMemory
 from config import OLLAMA_MODEL, SOUL_PATH
+
+
+class ThinkingIndicator:
+    """Animated thinking indicator to show processing"""
+
+    def __init__(self, message="Agent: Thinking"):
+        self.message = message
+        self.running = False
+        self.thread = None
+
+    def _animate(self):
+        """Animate the thinking indicator"""
+        dots = 0
+        while self.running:
+            # Clear line and print message with animated dots
+            sys.stdout.write('\r' + ' ' * 80)  # Clear line
+            sys.stdout.write('\r' + self.message + '.' * dots + ' ' * (3 - dots))
+            sys.stdout.flush()
+            dots = (dots + 1) % 4
+            time.sleep(0.5)
+        # Clear the thinking line when done
+        sys.stdout.write('\r' + ' ' * 80 + '\r')
+        sys.stdout.flush()
+
+    def start(self):
+        """Start the thinking animation"""
+        self.running = True
+        self.thread = threading.Thread(target=self._animate, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        """Stop the thinking animation"""
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=1)
 
 
 class SimpleAgent:
@@ -43,7 +81,7 @@ The user expects you to remember facts they've taught you and conversations you'
         return system_prompt
 
     def chat(self, user_message: str, save_to_memory: bool = True,
-             include_context: bool = True) -> tuple[str, bool]:
+             include_context: bool = True) -> tuple[str, bool, bool]:
         """Chat with the agent"""
 
         # Get relevant context from memory
@@ -69,7 +107,10 @@ The user expects you to remember facts they've taught you and conversations you'
         # Add current message
         messages.append({"role": "user", "content": user_message})
 
-        # Get response from Ollama
+        # Get response from Ollama with thinking indicator
+        thinking = ThinkingIndicator()
+        thinking.start()
+
         try:
             response = ollama.chat(
                 model=self.model,
@@ -78,6 +119,8 @@ The user expects you to remember facts they've taught you and conversations you'
             agent_response = response['message']['content']
         except Exception as e:
             agent_response = f"Error connecting to Ollama: {e}\n\nMake sure Ollama is running and the model '{self.model}' is available."
+        finally:
+            thinking.stop()
 
         # Update conversation history
         self.conversation_history.append({"role": "user", "content": user_message})
@@ -85,27 +128,31 @@ The user expects you to remember facts they've taught you and conversations you'
 
         # Save to memory
         soul_updated = False
+        compacted = False
         if save_to_memory:
             self.memory.add_conversation(user_message, agent_response)
             soul_updated = self.memory.update_soul_if_needed()
+            compacted = self.memory._check_auto_compact()
 
-        return agent_response, soul_updated
+        return agent_response, soul_updated, compacted
 
-    def learn_fact(self, fact: str, category: Optional[str] = None) -> tuple[str, bool]:
+    def learn_fact(self, fact: str, category: Optional[str] = None) -> tuple[str, bool, bool]:
         """Explicitly teach the agent a fact"""
         result = self.memory.add_fact(fact, category)
         soul_updated = self.memory.update_soul_if_needed()
-        return (f"Learned: {fact}" + (f" (Category: {category})" if category else ""), soul_updated)
+        compacted = self.memory._check_auto_compact()
+        return (f"Learned: {fact}" + (f" (Category: {category})" if category else ""), soul_updated, compacted)
 
-    def complete_task(self, task: str, outcome: Optional[str] = None) -> tuple[str, bool]:
+    def complete_task(self, task: str, outcome: Optional[str] = None) -> tuple[str, bool, bool]:
         """Record a completed task"""
         result = self.memory.add_task(task, status="completed", outcome=outcome)
         soul_updated = self.memory.update_soul_if_needed()
-        return (f"Task recorded: {task}", soul_updated)
+        compacted = self.memory._check_auto_compact()
+        return (f"Task recorded: {task}", soul_updated, compacted)
 
-    def search_memories(self, query: str, limit: int = 5) -> List[Dict]:
+    def search_memories(self, query: str, limit: int = 5, include_archive: bool = False) -> List[Dict]:
         """Search through the agent's memories"""
-        return self.memory.search_memory(query, limit=limit)
+        return self.memory.search_memory(query, limit=limit, include_archive=include_archive)
 
     def show_soul(self) -> str:
         """Display the current soul.md"""
@@ -155,10 +202,14 @@ def main():
     # Show memory status on startup
     stats = agent.analyze_growth()
     total_memories = stats['total_memories']
+    mem_stats = agent.memory.get_stats()
 
     print(f"[+] Agent initialized! (Model: {agent.model})")
     if total_memories > 0:
-        print(f"[MEMORY] Loaded {total_memories} existing memories from previous sessions")
+        if mem_stats['archive'] > 0:
+            print(f"[MEMORY] Loaded {mem_stats['hot']} hot + {mem_stats['archive']} archived memories")
+        else:
+            print(f"[MEMORY] Loaded {total_memories} existing memories from previous sessions")
         print(f"         - {stats['conversations']} conversations")
         print(f"         - {stats['facts']} facts")
         print(f"         - {stats['tasks']} tasks")
@@ -197,12 +248,16 @@ def main():
                 print("\n  /task <task>")
                 print("    Record a completed task")
                 print("    Example: /task Implemented user authentication")
-                print("\n  /search <query>")
+                print("\n  /search <query> [--archive]")
                 print("    Search through stored memories")
-                print("    Example: /search Python preferences")
+                print("    Add --archive to search archive too")
+                print("    Example: /search Python --archive")
                 print("\n  /stats")
                 print("    Show memory growth statistics")
-                print("    Displays counts by type and knowledge areas")
+                print("    Displays hot/archive counts and knowledge areas")
+                print("\n  /compact")
+                print("    Manually compact memories (move old to archive)")
+                print("    Auto-compaction happens at 1000 memories")
                 print("\n  /quit")
                 print("    Exit the agent")
                 print("\n" + "="*60)
@@ -223,31 +278,44 @@ def main():
 
             elif user_input.lower().startswith("/learn "):
                 fact = user_input[7:]
-                message, soul_updated = agent.learn_fact(fact)
+                message, soul_updated, compacted = agent.learn_fact(fact)
                 print(f"\n[LEARNED] {message}")
                 if soul_updated:
                     print("[NOTIFY] Soul updated with new knowledge")
+                if compacted:
+                    stats = agent.memory.get_stats()
+                    print(f"[NOTIFY] Auto-compacted: {stats['hot']} hot, {stats['archive']} archived")
 
             elif user_input.lower().startswith("/task "):
                 task = user_input[6:]
-                message, soul_updated = agent.complete_task(task)
+                message, soul_updated, compacted = agent.complete_task(task)
                 print(f"\n[TASK] {message}")
                 if soul_updated:
                     print("[NOTIFY] Soul updated with task completion")
+                if compacted:
+                    stats = agent.memory.get_stats()
+                    print(f"[NOTIFY] Auto-compacted: {stats['hot']} hot, {stats['archive']} archived")
 
             elif user_input.lower().startswith("/search "):
-                query = user_input[8:]
-                results = agent.search_memories(query)
+                query_parts = user_input[8:].strip()
+                include_archive = "--archive" in query_parts
+                query = query_parts.replace("--archive", "").strip()
+
+                results = agent.search_memories(query, include_archive=include_archive)
                 print(f"\n[SEARCH] Found {len(results)} memories:")
                 for i, result in enumerate(results, 1):
-                    print(f"\n{i}. {result.get('text', '')}")
+                    source = " [ARCHIVE]" if result.get('_from_archive') else ""
+                    print(f"\n{i}.{source} {result.get('text', '')}")
                 print(f"\n[NOTIFY] Search completed")
 
             elif user_input.lower() == "/stats":
                 stats = agent.analyze_growth()
+                mem_stats = agent.memory.get_stats()
                 print("\n[STATS] Growth Statistics:")
-                print(f"  Total Memories: {stats['total_memories']}")
-                print(f"  Conversations: {stats['conversations']}")
+                print(f"  Hot Storage: {mem_stats['hot']} memories")
+                print(f"  Archive: {mem_stats['archive']} memories")
+                print(f"  Total: {mem_stats['total']} memories")
+                print(f"\n  Conversations: {stats['conversations']}")
                 print(f"  Facts: {stats['facts']}")
                 print(f"  Tasks: {stats['tasks']}")
                 if stats['knowledge_areas']:
@@ -256,12 +324,23 @@ def main():
                         print(f"    - {area}: {count}")
                 print(f"\n[NOTIFY] Statistics retrieved")
 
+            elif user_input.lower() == "/compact":
+                stats_before = agent.memory.get_stats()
+                compact_stats = agent.memory.compact_memories(force=True)
+                print(f"\n[COMPACT] Compaction completed")
+                print(f"  Moved: {compact_stats['moved']} memories to archive")
+                print(f"  Hot storage: {compact_stats['hot']} memories")
+                print(f"  Archive: {compact_stats['archive']} memories")
+                print("[NOTIFY] Compaction completed")
+
             else:
-                print("\nAgent: ", end="", flush=True)
-                response, soul_updated = agent.chat(user_input)
-                print(response)
+                response, soul_updated, compacted = agent.chat(user_input)
+                print("\nAgent: " + response)
                 if soul_updated:
                     print("\n[NOTIFY] Soul updated automatically")
+                if compacted:
+                    stats = agent.memory.get_stats()
+                    print(f"\n[NOTIFY] Auto-compacted: {stats['hot']} hot, {stats['archive']} archived")
 
         except KeyboardInterrupt:
             print("\n\nGoodbye!")

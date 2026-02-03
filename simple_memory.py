@@ -12,11 +12,18 @@ class SimpleMemory:
     def __init__(self):
         """Initialize the memory layer"""
         self.memory_file = MEMORY_DIR / "memories.json"
+        self.archive_file = MEMORY_DIR / "memories_archive.json"
         self.memory_file.parent.mkdir(parents=True, exist_ok=True)
+
         self.memories = self._load_memories()
+        self.archive = []  # Lazy load - only when needed
+        self.archive_loaded = False
         # Initialize interaction count from existing conversation memories
         self.interaction_count = sum(1 for m in self.memories if m.get('type') == 'conversation')
         self.user_id = "default_user"
+
+        # Build type indexes for faster filtering
+        self._build_indexes()
 
     def _load_memories(self) -> List[Dict]:
         """Load memories from JSON file"""
@@ -33,6 +40,31 @@ class SimpleMemory:
         with open(self.memory_file, 'w', encoding='utf-8') as f:
             json.dump(self.memories, f, indent=2, ensure_ascii=False)
 
+    def _load_archive(self) -> List[Dict]:
+        """Load archived memories (lazy - only when needed)"""
+        if not self.archive_loaded:
+            if self.archive_file.exists():
+                try:
+                    with open(self.archive_file, 'r', encoding='utf-8') as f:
+                        self.archive = json.load(f)
+                except:
+                    self.archive = []
+            else:
+                self.archive = []
+            self.archive_loaded = True
+        return self.archive
+
+    def _save_archive(self):
+        """Save archive to file"""
+        with open(self.archive_file, 'w', encoding='utf-8') as f:
+            json.dump(self.archive, f, indent=2, ensure_ascii=False)
+
+    def _build_indexes(self):
+        """Build indexes for faster filtering"""
+        self.conversations_idx = [i for i, m in enumerate(self.memories) if m.get('type') == 'conversation']
+        self.facts_idx = [i for i, m in enumerate(self.memories) if m.get('type') == 'fact']
+        self.tasks_idx = [i for i, m in enumerate(self.memories) if m.get('type') == 'task']
+
     def add_conversation(self, user_message: str, agent_response: str, metadata: Optional[Dict] = None) -> str:
         """Store a conversation exchange"""
         memory = {
@@ -47,6 +79,7 @@ class SimpleMemory:
         self.memories.append(memory)
         self._save_memories()
         self.interaction_count += 1
+        self._build_indexes()
         return str(memory["id"])
 
     def add_fact(self, fact: str, category: Optional[str] = None) -> str:
@@ -61,6 +94,7 @@ class SimpleMemory:
         }
         self.memories.append(memory)
         self._save_memories()
+        self._build_indexes()
         return str(memory["id"])
 
     def add_task(self, task: str, status: str = "completed", outcome: Optional[str] = None) -> str:
@@ -76,15 +110,38 @@ class SimpleMemory:
         }
         self.memories.append(memory)
         self._save_memories()
+        self._build_indexes()
         return str(memory["id"])
 
-    def search_memory(self, query: str, limit: int = 5, memory_type: Optional[str] = None) -> List[Dict]:
-        """Simple keyword search through memories"""
+    def search_memory(self, query: str, limit: int = 5, memory_type: Optional[str] = None,
+                     include_archive: bool = False) -> List[Dict]:
+        """Search through memories with optional archive inclusion"""
+
+        # Search hot storage first
+        results = self._search_in_storage(self.memories, query, memory_type)
+
+        # Optionally search archive
+        if include_archive:
+            self._load_archive()
+            if self.archive:
+                archive_results = self._search_in_storage(self.archive, query, memory_type)
+                # Mark archive results
+                for r in archive_results:
+                    r['_from_archive'] = True
+                results.extend(archive_results)
+
+        # Sort by relevance
+        results.sort(key=lambda x: x.get("_score", 0), reverse=True)
+        return results[:limit]
+
+    def _search_in_storage(self, storage: List[Dict], query: str,
+                          memory_type: Optional[str] = None) -> List[Dict]:
+        """Helper: Search in a specific storage"""
         query_lower = query.lower()
         query_words = query_lower.split()
         results = []
 
-        for memory in self.memories:
+        for memory in storage:
             if memory_type and memory.get("type") != memory_type:
                 continue
 
@@ -103,13 +160,20 @@ class SimpleMemory:
                 memory_copy["_score"] = matches
                 results.append(memory_copy)
 
-        # Sort by relevance
-        results.sort(key=lambda x: x.get("_score", 0), reverse=True)
-        return results[:limit]
+        return results
 
     def get_all_memories(self) -> List[Dict]:
         """Retrieve all memories"""
         return self.memories
+
+    def get_stats(self) -> Dict[str, int]:
+        """Get memory statistics including archive"""
+        self._load_archive()
+        return {
+            "hot": len(self.memories),
+            "archive": len(self.archive),
+            "total": len(self.memories) + len(self.archive)
+        }
 
     def get_context_for_query(self, query: str, max_results: int = 8) -> str:
         """Get relevant context from memory for a query"""
@@ -186,6 +250,80 @@ class SimpleMemory:
         """Update soul.md if enough interactions have occurred"""
         if force or self.interaction_count % SOUL_UPDATE_FREQUENCY == 0:
             self._update_soul()
+            return True
+        return False
+
+    def compact_memories(self, force: bool = False) -> Dict[str, int]:
+        """
+        Compact memories by moving old conversations/tasks to archive.
+
+        Args:
+            force: Force compaction even if under threshold
+
+        Returns:
+            Stats dict with moved counts
+        """
+        from config import COMPACTION_THRESHOLD, COMPACTION_KEEP_HOT, COMPACTION_KEEP_TASKS
+
+        # Check if compaction needed
+        total_hot = len(self.memories)
+        if not force and total_hot < COMPACTION_THRESHOLD:
+            self._load_archive()  # Ensure archive is loaded for stats
+            return {"moved": 0, "hot": total_hot, "archive": len(self.archive)}
+
+        # Ensure archive is loaded
+        self._load_archive()
+
+        # Separate facts (keep all) from conversations/tasks
+        facts = [m for m in self.memories if m.get('type') == 'fact']
+        conversations = [m for m in self.memories if m.get('type') == 'conversation']
+        tasks = [m for m in self.memories if m.get('type') == 'task']
+
+        # Sort by timestamp (oldest first)
+        conversations.sort(key=lambda x: x.get('timestamp', ''))
+        tasks.sort(key=lambda x: x.get('timestamp', ''))
+
+        # Determine what to move to archive
+        keep_conversations = conversations[-COMPACTION_KEEP_HOT:] if len(conversations) > COMPACTION_KEEP_HOT else conversations
+        move_conversations = conversations[:-COMPACTION_KEEP_HOT] if len(conversations) > COMPACTION_KEEP_HOT else []
+
+        keep_tasks = tasks[-COMPACTION_KEEP_TASKS:] if len(tasks) > COMPACTION_KEEP_TASKS else tasks
+        move_tasks = tasks[:-COMPACTION_KEEP_TASKS] if len(tasks) > COMPACTION_KEEP_TASKS else []
+
+        # Add to archive
+        self.archive.extend(move_conversations)
+        self.archive.extend(move_tasks)
+
+        # Rebuild hot storage
+        self.memories = facts + keep_conversations + keep_tasks
+
+        # Reassign IDs
+        for i, mem in enumerate(self.memories):
+            mem['id'] = i
+
+        # Save both files
+        self._save_memories()
+        self._save_archive()
+
+        # Rebuild indexes
+        self._build_indexes()
+
+        return {
+            "moved": len(move_conversations) + len(move_tasks),
+            "hot": len(self.memories),
+            "archive": len(self.archive)
+        }
+
+    def _check_auto_compact(self) -> bool:
+        """Check if auto-compaction should trigger"""
+        from config import COMPACTION_THRESHOLD, AUTO_COMPACT_ENABLED
+
+        if not AUTO_COMPACT_ENABLED:
+            return False
+
+        total_hot = len(self.memories)
+        if total_hot >= COMPACTION_THRESHOLD:
+            self.compact_memories()
             return True
         return False
 

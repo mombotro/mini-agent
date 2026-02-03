@@ -26,3 +26,10 @@ MEMORY_CONFIG = {
 SOUL_UPDATE_FREQUENCY = 5  # Update soul.md every N interactions
 PERSONALITY_TRAITS_MAX = 10
 KNOWLEDGE_AREAS_MAX = 20
+
+# Compaction Settings
+AUTO_COMPACT_ENABLED = True
+COMPACTION_THRESHOLD = 1000  # Compact when hot storage exceeds this
+COMPACTION_KEEP_HOT = 800     # Keep this many recent conversations in hot storage
+COMPACTION_KEEP_TASKS = 100   # Keep this many recent tasks in hot storage
+SEARCH_ARCHIVE_DEFAULT = False  # Include archive in searches by default
