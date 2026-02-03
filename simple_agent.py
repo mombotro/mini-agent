@@ -3,6 +3,7 @@ import ollama
 import sys
 import time
 import threading
+import subprocess
 from datetime import datetime
 from typing import Optional, Dict, List
 from simple_memory import SimpleMemory
@@ -193,6 +194,35 @@ The user expects you to remember facts they've taught you and conversations you'
         return f"Committed {len(exchanges_to_commit)} conversation exchange(s) and updated soul"
 
 
+def auto_git_commit():
+    """Automatically commit changes to git on quit"""
+    try:
+        # Check if there are changes to commit
+        status = subprocess.run(['git', 'status', '--porcelain'],
+                              capture_output=True, text=True, check=True)
+
+        if status.stdout.strip():
+            # There are changes, commit them
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            commit_message = f"Auto-save agent session - {timestamp}\n\nCo-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>"
+
+            # Add all changes
+            subprocess.run(['git', 'add', '.'], check=True)
+
+            # Commit with message
+            subprocess.run(['git', 'commit', '-m', commit_message], check=True)
+
+            print("\n[GIT] Changes automatically committed")
+            return True
+    except subprocess.CalledProcessError:
+        # Git command failed, might not be a git repo or no git installed
+        pass
+    except Exception as e:
+        # Silent fail - don't interrupt the quit process
+        pass
+    return False
+
+
 def main():
     """Interactive agent interface"""
     print("[*] Initializing Ollama Agent with Memory Layer...\n")
@@ -226,6 +256,7 @@ def main():
                 continue
 
             if user_input.lower() == "/quit":
+                auto_git_commit()
                 print("Goodbye!")
                 break
 
@@ -274,27 +305,22 @@ def main():
                 num_exchanges = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
                 result = agent.commit_conversation(num_exchanges)
                 print(f"\n[COMMIT] {result}")
-                print("[NOTIFY] Soul updated with new memories")
 
             elif user_input.lower().startswith("/learn "):
                 fact = user_input[7:]
                 message, soul_updated, compacted = agent.learn_fact(fact)
                 print(f"\n[LEARNED] {message}")
-                if soul_updated:
-                    print("[NOTIFY] Soul updated with new knowledge")
                 if compacted:
                     stats = agent.memory.get_stats()
-                    print(f"[NOTIFY] Auto-compacted: {stats['hot']} hot, {stats['archive']} archived")
+                    print(f"  Memory organized: {stats['hot']} active, {stats['archive']} archived")
 
             elif user_input.lower().startswith("/task "):
                 task = user_input[6:]
                 message, soul_updated, compacted = agent.complete_task(task)
                 print(f"\n[TASK] {message}")
-                if soul_updated:
-                    print("[NOTIFY] Soul updated with task completion")
                 if compacted:
                     stats = agent.memory.get_stats()
-                    print(f"[NOTIFY] Auto-compacted: {stats['hot']} hot, {stats['archive']} archived")
+                    print(f"  Memory organized: {stats['hot']} active, {stats['archive']} archived")
 
             elif user_input.lower().startswith("/search "):
                 query_parts = user_input[8:].strip()
@@ -306,7 +332,6 @@ def main():
                 for i, result in enumerate(results, 1):
                     source = " [ARCHIVE]" if result.get('_from_archive') else ""
                     print(f"\n{i}.{source} {result.get('text', '')}")
-                print(f"\n[NOTIFY] Search completed")
 
             elif user_input.lower() == "/stats":
                 stats = agent.analyze_growth()
@@ -319,10 +344,9 @@ def main():
                 print(f"  Facts: {stats['facts']}")
                 print(f"  Tasks: {stats['tasks']}")
                 if stats['knowledge_areas']:
-                    print(f"\n  Knowledge Areas:")
+                    print(f"\n  I've been learning about:")
                     for area, count in stats['knowledge_areas'].items():
-                        print(f"    - {area}: {count}")
-                print(f"\n[NOTIFY] Statistics retrieved")
+                        print(f"    • {area}: {count} {'fact' if count == 1 else 'facts'}")
 
             elif user_input.lower() == "/compact":
                 stats_before = agent.memory.get_stats()
@@ -331,19 +355,18 @@ def main():
                 print(f"  Moved: {compact_stats['moved']} memories to archive")
                 print(f"  Hot storage: {compact_stats['hot']} memories")
                 print(f"  Archive: {compact_stats['archive']} memories")
-                print("[NOTIFY] Compaction completed")
 
             else:
                 response, soul_updated, compacted = agent.chat(user_input)
                 print("\nAgent: " + response)
-                if soul_updated:
-                    print("\n[NOTIFY] Soul updated automatically")
                 if compacted:
                     stats = agent.memory.get_stats()
-                    print(f"\n[NOTIFY] Auto-compacted: {stats['hot']} hot, {stats['archive']} archived")
+                    print(f"\n  (Memory organized: {stats['hot']} active, {stats['archive']} archived)")
 
         except KeyboardInterrupt:
-            print("\n\nGoodbye!")
+            print("\n")
+            auto_git_commit()
+            print("Goodbye!")
             break
         except Exception as e:
             print(f"\n[ERROR] {e}")

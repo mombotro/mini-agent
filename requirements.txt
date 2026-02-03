@@ -1,0 +1,5 @@
+ollama
+mem0ai>=0.0.1
+chromadb
+python-dotenv
+pydantic

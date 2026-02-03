@@ -8,7 +8,7 @@ SOUL_PATH = BASE_DIR / "soul.md"
 MEMORY_DIR = BASE_DIR / "memory_store"
 
 # Ollama Configuration
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:1b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "moondream")  # Vision-capable model
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 # Memory Configuration
